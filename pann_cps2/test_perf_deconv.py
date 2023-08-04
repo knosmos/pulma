@@ -9,6 +9,8 @@ from torch.utils.data.sampler import SubsetRandomSampler
 import torch.nn.functional as F
 import numpy as np
 
+from torch.utils.tensorboard import SummaryWriter
+
 # Calculate performance
 import sklearn
 
@@ -18,8 +20,7 @@ import matplotlib.pyplot as plt
 
 # Custom imports
 from H5_dataset import HF_Lung_Dataset
-#from models import Cnn14_8k, TwinNetworkGRU
-from models_deconv import TwinNetworkGRU
+from models import Cnn14_8k, TwinNetworkDeconv
 
 import sys
 
@@ -36,6 +37,9 @@ random_seed = 4 # chosen by fair dice roll. guaranteed to be random.
 torch.manual_seed(random_seed)
 
 threshold = 0.4
+
+# Tensorboard
+writer = SummaryWriter()
 
 ''' Data '''
 print("Loading data...")
@@ -54,20 +58,18 @@ print(f"Test: {len(indices)} samples")
 
 # Enable GPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#device = torch.device('cpu')
 print(f"Using device: {device}")
 
 ''' Model '''
 # Initialize model
 print("Initializing model...")
-#model = TwinNetworkGRU(64, 4, device)
-model = TwinNetworkGRU(64, 4, device, gru_layers=2)
+model = TwinNetworkDeconv(64, 4, device)
 #fc_audioset_in_params = model.fc_audioset.in_features
 #model.fc_audioset = nn.Linear(fc_audioset_in_params, 6, bias=True)
 
 exp_name = sys.argv[1]
 
-checkpoint = torch.load(f"models/model_{exp_name}.pt")
+checkpoint = torch.load(f"model_{exp_name}.pt")
 
 # Remove all the "module." from the keys because that's there for some reason
 checkpoint_clean = {}
@@ -145,11 +147,11 @@ with torch.no_grad():
     #writer.add_pr_curve(exp_name + '_pr_curve', full_labels, full_outputs, 0)
     #writer.close()
 
-    #print(f'Test F1 Score: {(scores / total) * 100}%')
-    #print(f'Test F2 Score: {(bscores / total) * 100}%')
-    #print(f'Test Accuracy: {correct / acc_total * 100}%')
+    print(f'Test F1 Score: {(scores / total) * 100}%')
+    print(f'Test F2 Score: {(bscores / total) * 100}%')
+    print(f'Test Accuracy: {correct / acc_total * 100}%')
 
-    #print(full_labels.shape, full_outputs.shape) 
+    print(full_labels.shape, full_outputs.shape) 
     full_labels = full_labels.reshape(
         (full_labels.shape[0] * full_labels.shape[1], 4)
     ).transpose(1, 0).cpu().numpy()
@@ -171,15 +173,13 @@ with torch.no_grad():
 
     auc = []
     f1 = []
-    prauc = []
 
     for i in range(4):
         precision, recall, thresholds = sklearn.metrics.precision_recall_curve(full_labels[i], full_outputs[i])
         ax1.plot(recall, precision, label="IEDC"[i])
         f1_scores = 2*recall*precision/(recall+precision+np.finfo(float).eps)
-        #print(f'Best threshold for class {i}: ', thresholds[np.argmax(f1_scores)])
-        #print(f'Best F1-Score for class {i}: ', np.max(f1_scores))
-        f1.append(np.max(f1_scores))
+        print(f'Best threshold for class {i}: ', thresholds[np.argmax(f1_scores)])
+        print(f'Best F1-Score for class {i}: ', np.max(f1_scores))
 
         #p = full_labels[i].sum()
         #n = len(full_labels[i]) - p
@@ -192,12 +192,10 @@ with torch.no_grad():
         '''
         ax2.plot(fpr, tpr, label="IEDC"[i])
         auc.append(sklearn.metrics.roc_auc_score(full_labels[i], full_outputs[i]))
-        #f1.append(sklearn.metrics.f1_score(full_labels[i] > threshold, full_outputs[i].round()))
-        prauc.append(sklearn.metrics.average_precision_score(full_labels[i], full_outputs[i]))
+        f1.append(sklearn.metrics.f1_score(full_labels[i] > threshold, full_outputs[i].round()))
     
     print(f'AUC: {auc}')
-    print(f'PR AUC: {prauc}')
     print(f'F1: {f1}')
     
     plt.legend()
-    plt.savefig(f"curves/pr_{exp_name}.png")
+    plt.savefig(f"pr_{exp_name}_verify.png")

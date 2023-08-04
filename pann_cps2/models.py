@@ -536,6 +536,132 @@ class Cnn14_8k_original(nn.Module):
         return framewise_output
         #return output_dict
 
+class Cnn14_8k_deconv(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, fmax, classes_num):
+        
+        super(Cnn14_8k_deconv, self).__init__() 
+
+        assert sample_rate == 8000
+        assert window_size == 256
+        assert hop_size == 80
+        assert mel_bins == 64
+        assert fmin == 50
+        assert fmax == 4000
+
+        window = 'hann'
+        center = True
+        pad_mode = 'reflect'
+        ref = 1.0
+        amin = 1e-10
+        top_db = None
+
+        # Spectrogram extractor
+        self.spectrogram_extractor = Spectrogram(n_fft=window_size, hop_length=hop_size, 
+            win_length=window_size, window=window, center=center, pad_mode=pad_mode, 
+            freeze_parameters=True)
+
+        # Logmel feature extractor
+        self.logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=window_size, 
+            n_mels=mel_bins, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db, 
+            freeze_parameters=True)
+
+        # Spec augmenter
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2, 
+            freq_drop_width=8, freq_stripes_num=2)
+
+        self.bn0 = nn.BatchNorm2d(64)
+
+        self.conv_block1 = ConvBlock(in_channels=1, out_channels=64)
+        self.conv_block2 = ConvBlock(in_channels=64, out_channels=128)
+        self.conv_block3 = ConvBlock(in_channels=128, out_channels=256)
+        self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
+        self.conv_block5 = ConvBlock(in_channels=512, out_channels=1024)
+        self.conv_block6 = ConvBlock(in_channels=1024, out_channels=2048)
+
+        self.deconv_block1 = nn.ConvTranspose2d(2048, 1024, 2, 2, output_padding=1)
+        self.deconv_block2 = nn.ConvTranspose2d(1024, 512, 2, 2, output_padding=1)
+        self.deconv_block3 = nn.ConvTranspose2d(512, 256, 2, 2, output_padding=1)
+	
+        self.fc1 = nn.Linear(256, 256, bias=True)
+        self.fc_audioset = nn.Linear(256, classes_num, bias=True)
+        
+        self.init_weight()
+
+        self.interpolator = Interpolator(
+            ratio=4, 
+            interpolate_mode="nearest"
+        )
+
+    def init_weight(self):
+        init_bn(self.bn0)
+        init_layer(self.fc1)
+        init_layer(self.fc_audioset)
+ 
+    def forward(self, x, mixup_lambda=None):
+        """
+        Input: (batch_size, data_length)"""
+
+        #x = self.spectrogram_extractor(input)   # (batch_size, 1, time_steps, freq_bins)
+        #x = self.logmel_extractor(x)    # (batch_size, 1, time_steps, mel_bins)
+        x = x[:, np.newaxis, :, :]
+
+        x = x.transpose(1, 3)
+        x = self.bn0(x)
+        x = x.transpose(1, 3)
+        frames_num = x.shape[2]
+        if self.training:
+            x = self.spec_augmenter(x)
+
+        # Mixup on spectrogram
+        if self.training and mixup_lambda is not None:
+            x = do_mixup(x, mixup_lambda)
+        
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv_block5(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv_block6(x, pool_size=(1, 1), pool_type='avg')
+        x = F.dropout(x, p=0.5, training=self.training)
+        
+        #print("after convolution shape:",x.shape)
+
+        x = self.deconv_block1(x)
+        #print("after deconv_block1 shape:",x.shape)
+        x = self.deconv_block2(x)
+        #print("after deconv_block2 shape:",x.shape)
+        x = self.deconv_block3(x)
+        #print("after deconv_block3 shape:",x.shape)
+        
+        x = torch.mean(x, dim=3)
+        
+        x1 = F.max_pool1d(x, kernel_size=3, stride=1, padding=1)
+        x2 = F.avg_pool1d(x, kernel_size=3, stride=1, padding=1)
+        x = x1 + x2
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = x.transpose(1, 2)
+        x = F.relu_(self.fc1(x))
+        x = F.dropout(x, p=0.5, training=self.training)
+
+        segmentwise_output = torch.sigmoid(self.fc_audioset(x))
+        (clipwise_output, _) = torch.max(segmentwise_output, dim=1)
+
+        # Get framewise output
+        framewise_output = self.interpolator(segmentwise_output)
+        #print("framewise_output shape:",framewise_output.shape)
+        framewise_output = pad_framewise_output(framewise_output, frames_num)
+        #print("framewise_output shape after padding:",framewise_output.shape)
+
+        output_dict = {'framewise_output': framewise_output, 
+            'clipwise_output': clipwise_output}
+
+        return framewise_output
+
 class BiGRUNetwork(nn.Module):
     def __init__(self, input_size, num_classes, device):
         super(BiGRUNetwork, self).__init__()
@@ -604,6 +730,28 @@ class TwinNetworkGRU(nn.Module):
 
     def forward(self, x):
         x = self.backbone(x)
+        if self.single:
+            x = self.l(x)
+            return x, x
+        x1 = self.l(x)
+        x2 = self.r(x)
+        return x1, x2
+
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight.data)
+
+class TwinNetworkDeconv(nn.Module):
+    def __init__(self, input_size, num_classes, device, single=False):
+        super(TwinNetworkDeconv, self).__init__()
+        self.l = Cnn14_8k_deconv(sample_rate=8000, window_size=256, hop_size=80, mel_bins=64, fmin=50, fmax=4000, classes_num=num_classes)
+        self.r = Cnn14_8k_deconv(sample_rate=8000, window_size=256, hop_size=80, mel_bins=64, fmin=50, fmax=4000, classes_num=num_classes)
+        self.device = device
+        self.single = single
+        self.init_weights()
+
+    def forward(self, x):
         if self.single:
             x = self.l(x)
             return x, x

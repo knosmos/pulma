@@ -42,6 +42,8 @@ parser.add_argument('--pretrained', action='store_true', help='Use pretrained mo
 parser.add_argument('--val', type=float, default=0.1, help='Validation split')
 parser.add_argument('--shuffle', action='store_true', help='Shuffle dataset')
 parser.add_argument('--cps', action='store_true', help='Use CPS loss')
+parser.add_argument('--cps_weight', type=float, default=1.5, help='Weight of CPS loss')
+parser.add_argument('--warmup', type=int, default=0, help='Number of epochs to run purely supervised')
 
 # NN Hyperparameters
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train for')
@@ -272,7 +274,7 @@ for epoch in range(args.epochs):
 
         #loss = sup_loss + 1.5 * cps_loss
         loss = sup_loss
-        if args.cps:
+        if args.cps and epoch >= args.warmup:
             loss += 1.5 * cps_loss
 
         # Backward and optimize

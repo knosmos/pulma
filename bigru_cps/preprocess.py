@@ -66,7 +66,7 @@ def filter_audio(audio):
     orig_shape = filtered.shape
     filtered = np.reshape(filtered, (2, -1))
 
-    filtered = nr.reduce_noise(y=filtered, sr=sr,  time_mask_smooth_ms=64, prop_decrease=0.90)
+    filtered = nr.reduce_noise(y=filtered, sr=sr,  time_mask_smooth_ms=64, prop_decrease=0.8)
     filtered = filtered.reshape(orig_shape)
 
     #filtered = denoise_wavelet(filtered, method='VisuShrink', mode='soft', wavelet_levels=3, wavelet='sym8', rescale_sigma='True')

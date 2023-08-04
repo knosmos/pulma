@@ -1,0 +1,3 @@
+python train_gru.py --name cps6_pretrained_gru_ex1 --pretrained --cps --percent 6.25 --shuffle --batch 16 --epochs 30 --lr 0.0001 --cps_weight 0.1 --warmup 5
+python train_gru.py --name cps6_pretrained_gru_ex2 --pretrained --cps --percent 6.25 --shuffle --batch 16 --epochs 30 --lr 0.0005 --cps_weight 0.01 --warmup 5
+python train_gru.py --name cps6_pretrained_gru_ex3 --pretrained --cps --percent 6.25 --shuffle --batch 16 --epochs 30 --lr 0.0005 --cps_weight 0.1 --warmup 0

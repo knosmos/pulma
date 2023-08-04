@@ -17,7 +17,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # Custom imports
-from H5_dataset import HF_Lung_Dataset
+from H5_dataset2 import HF_Lung_Dataset
 #from models import Cnn14_8k, TwinNetworkGRU
 from models_deconv import TwinNetworkGRU
 
@@ -26,7 +26,7 @@ import sys
 ''' Settings '''
 # NN Hyperparameters
 num_epochs = 300
-batch_size = 64
+batch_size = 1
 learning_rate = 0.001
 validation_split = .1
 shuffle_dataset = False # Prevent train/val mixing
@@ -80,29 +80,19 @@ model.to(device)
 
 ''' Testing '''
 # Train the model
+ranks = []
 print("Testing model...")
 with torch.no_grad():
-    scores = np.zeros(4)
-    bscores = np.zeros(4)
     total = 0
     correct = 0
     acc_total = 0
 
-    full_outputs = "empty"
-    full_labels = "empty"
-
-    for specs, labels in tqdm(test_loader):
+    for specs, labels, files in tqdm(test_loader):
+        if labels[0].sum(axis=0)[3] == 0:# and labels[0].sum(axis=0)[2] == 0:
+            continue
+        scores = np.zeros(4)
         inp = specs.float().to(device)
         outputs, _ = model(inp)
-        if full_outputs == "empty":
-            full_outputs = outputs
-        else: # concat
-            full_outputs = torch.cat((full_outputs, outputs))
-
-        if full_labels == "empty":
-            full_labels = labels
-        else:
-            full_labels = torch.cat((full_labels, labels))
 
         batch_size = labels.shape[0]
         total += batch_size
@@ -118,7 +108,7 @@ with torch.no_grad():
 
         for image in range(len(predicted)):
             same = predicted[image] == labels[image].to(device)
-            correct += same.all(axis=1).sum()
+            correct = same.all(axis=1).sum()
         acc_total += labels.shape[0] * labels.shape[1]
 
         # calculate F1 score for each of six classes
@@ -129,75 +119,17 @@ with torch.no_grad():
             (labels.shape[0] * labels.shape[1], 4)
         ).transpose(1, 0)
         #print(labels.shape)
+        '''
         for i in range(4):
-            scores[i] += batch_size * sklearn.metrics.f1_score(
+            scores[i] = batch_size * sklearn.metrics.f1_score(
                 predicted[i].cpu().numpy(),
                 labels[i].cpu().numpy(),
                 zero_division=0
             )
-            bscores[i] += batch_size * sklearn.metrics.fbeta_score(
-                predicted[i].cpu().numpy(),
-                labels[i].cpu().numpy(),
-                beta=2,
-                zero_division=0
-            )
-
-    #writer.add_pr_curve(exp_name + '_pr_curve', full_labels, full_outputs, 0)
-    #writer.close()
-
-    #print(f'Test F1 Score: {(scores / total) * 100}%')
-    #print(f'Test F2 Score: {(bscores / total) * 100}%')
-    #print(f'Test Accuracy: {correct / acc_total * 100}%')
-
-    #print(full_labels.shape, full_outputs.shape) 
-    full_labels = full_labels.reshape(
-        (full_labels.shape[0] * full_labels.shape[1], 4)
-    ).transpose(1, 0).cpu().numpy()
-    full_outputs = full_outputs.reshape(
-        (full_outputs.shape[0] * full_outputs.shape[1], 4)
-    ).transpose(1, 0).cpu().numpy()
-
-    #fig = plt.figure(figsize=(8, 6))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-    ax1.set_xlabel("recall")
-    ax1.set_ylabel("precision")
-
-    ax2.set_xlabel("false positive rate")
-    ax2.set_ylabel("true positive rate")
-
-    fig.suptitle(exp_name)
-    plt.style.use("ggplot")
-
-    auc = []
-    f1 = []
-    prauc = []
-
-    for i in range(4):
-        precision, recall, thresholds = sklearn.metrics.precision_recall_curve(full_labels[i], full_outputs[i])
-        ax1.plot(recall, precision, label="IEDC"[i])
-        f1_scores = 2*recall*precision/(recall+precision+np.finfo(float).eps)
-        #print(f'Best threshold for class {i}: ', thresholds[np.argmax(f1_scores)])
-        #print(f'Best F1-Score for class {i}: ', np.max(f1_scores))
-        f1.append(np.max(f1_scores))
-
-        #p = full_labels[i].sum()
-        #n = len(full_labels[i]) - p
-        fpr, tpr, thresholds = sklearn.metrics.roc_curve(full_labels[i], full_outputs[i])
         '''
-        tp = tpr * p
-        fp = fpr * n
-        prec = tp / (fp + tp)
-        rec = tpr
-        '''
-        ax2.plot(fpr, tpr, label="IEDC"[i])
-        auc.append(sklearn.metrics.roc_auc_score(full_labels[i], full_outputs[i]))
-        #f1.append(sklearn.metrics.f1_score(full_labels[i] > threshold, full_outputs[i].round()))
-        prauc.append(sklearn.metrics.average_precision_score(full_labels[i], full_outputs[i]))
-    
-    print(f'AUC: {auc}')
-    print(f'PR AUC: {prauc}')
-    print(f'F1: {f1}')
-    
-    plt.legend()
-    plt.savefig(f"curves/pr_{exp_name}.png")
+        ranks.append([files[0], correct / (labels.shape[1])])
+        #print(files[0], correct / acc_total)
+        #if correct / (labels.shape[0] * labels.shape[1]) > 0.8:
+        #    break
+ranks.sort(key=lambda x: x[1], reverse=True)
+print(ranks[:10])

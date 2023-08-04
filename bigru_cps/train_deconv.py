@@ -16,11 +16,11 @@ import sklearn
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import datetime
-import os
+import os, sys
 
 # Custom imports
 from H5_dataset import HF_Lung_Dataset
-from models import TwinNetworkGRU
+from models_deconv import TwinNetworkGRU
 import people_split
 #import librosa
 #import librosa.display
@@ -42,14 +42,15 @@ parser.add_argument('--pretrained', action='store_true', help='Use pretrained mo
 parser.add_argument('--val', type=float, default=0.1, help='Validation split')
 parser.add_argument('--shuffle', action='store_true', help='Shuffle dataset')
 parser.add_argument('--cps', action='store_true', help='Use CPS loss')
-parser.add_argument('--cps_weight', type=float, default=1.5, help='Weight of CPS loss')
+parser.add_argument('--cps_weight', type=float, default=1.0, help='Weight of CPS loss')
 parser.add_argument('--warmup', type=int, default=0, help='Number of epochs to run purely supervised')
+
+parser.add_argument('--seed', type=int, default=4, help='Random seed')
 
 # NN Hyperparameters
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train for')
 parser.add_argument('--batch', type=int, default=16, help='Batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-
 
 # Get arguments
 args = parser.parse_args()
@@ -63,7 +64,7 @@ print(["Not using pretrained model", f"Using pretrained model"][args.pretrained]
 print(f"Using {args.warmup} warmup epochs")
 
 # Other settings
-random_seed = 4 # chosen by fair dice roll. guaranteed to be random.
+random_seed = args.seed # chosen by fair dice roll. guaranteed to be random.
 torch.manual_seed(random_seed)
 np.random.seed(random_seed)
 
@@ -90,6 +91,9 @@ train_indices, val_indices = indices[split:], indices[:split]
 #train_indices, val_indices = indices[:dataset_size-split], indices[dataset_size-split:]
 
 # extract percentage of data
+#'''REVERSE DATA'''
+#train_indices = train_indices[::-1]
+
 train_labeled_indices = train_indices[:int(len(train_indices) * args.percent) // 100]
 train_unlabeled_indices = train_indices[int(len(train_indices) * args.percent) // 100:]
 
@@ -104,19 +108,17 @@ validation_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=val
 
 print(f"Train: {len(train_indices)} samples, Validation: {len(val_indices)} samples")
 
-# Result storage
-csv = open(f"results/{args.name}_{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S')}.csv", "w")
-writer = SummaryWriter()
-
 ''' Model '''
 # Enable GPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device("cpu")
 print(f"Using device: {device}")
 
 # Initialize models
 print("Initializing model...")
 #extractor = Cnn14_8k(sample_rate=8000, window_size=256, hop_size=80, mel_bins=64, fmin=50, fmax=4000, classes_num=527)
-model = TwinNetworkGRU(64, 4, device, single=(not args.cps))
+torch.manual_seed(1) # NOTE DIFFERENT MODEL INITIALIZATION
+model = TwinNetworkGRU(64, 4, device, single=(not args.cps), gru_layers=2)
 
 # Load pretrained model
 if args.pretrained:
@@ -125,11 +127,11 @@ if args.pretrained:
     checkpoint = torch.load(checkpoint_path)
     
     # Eliminate mismatching layers
-    #model_dict = model.backbone.state_dict()
-    #state_dict={k : v for k, v in zip(model_dict.keys(), checkpoint['model'].values()) if v.size() == model_dict[k].size()}
+    model_dict = model.l.backbone.state_dict()
+    state_dict={k : v for k, v in zip(model_dict.keys(), checkpoint['model'].values()) if v.size() == model_dict[k].size()}
 
-    model.l.backbone.load_state_dict(checkpoint['model'])
-    model.r.backbone.load_state_dict(checkpoint['model'])
+    model.l.backbone.load_state_dict(state_dict, strict=False)
+    model.r.backbone.load_state_dict(state_dict, strict=False)
 
 # Load from checkpoint
 if args.checkpoint != "":
@@ -141,9 +143,20 @@ if args.checkpoint != "":
 model.to(device)
 #model = torch.nn.DataParallel(model)
 
+# calculate individual weights
+wt = np.zeros(4)
+for specs, label_batch in train_labeled_loader:
+    wt = np.add(wt, label_batch.sum(dim=1).sum(dim=0))
+m = int(wt[0])
+for i in range(4):
+    wt[i] = m / wt[i]
+print("Loss weighting:", wt)
+
 # Loss and optimizer
-criterion = nn.BCELoss() # Needed since we are doing multilabel classification
-criterion_cps = nn.BCELoss()
+
+criterion = nn.BCELoss(weight=wt.to(device)) # Needed since we are doing multilabel classification
+#criterion_cps = nn.BCELoss(reduction="none")
+criterion_cps = nn.BCELoss(weight=wt.to(device))
 
 # these are copied from CPS code
 #criterion = ProbOhemCrossEntropy2d(ignore_label=255, thresh=0.7,
@@ -164,7 +177,12 @@ total_step = max(len(train_unlabeled_loader), len(train_labeled_loader))
 
 best_val_acc = 0
 best_val_loss = 100
+best_val_auc = 0
 best_val_f1 = 0
+
+# Result storage
+csv = open(f"results/{args.name}_{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S')}.csv", "w")
+writer = SummaryWriter(comment = "_"  + args.name)
 
 for epoch in range(args.epochs):
     model.train()
@@ -175,11 +193,14 @@ for epoch in range(args.epochs):
 
     epoch_correct_u = 0 # unlabeled
     epoch_total_u = 0
+    sum_sup_loss = 0
+    sum_unsup_thresholded_loss = 0
+    sum_unsup_loss = 0
+    sum_cps_loss = 0
 
     scores = np.zeros(4)
     normal_total = 0
-    #for i, (specs_labeled, labels, specs_unlabeled, _) in enumerate(zip(train_labeled_loader, train_unlabeled_loader)):
-    
+
     for i in range(total_step):
         #print(f'iter={i}')
         optim_l.zero_grad()
@@ -187,7 +208,9 @@ for epoch in range(args.epochs):
         # Get data
         specs_labeled, labels = train_labeled_loader.__iter__().__next__()
         specs_unlabeled, unsup_labels = train_unlabeled_loader.__iter__().__next__()
-
+        #specs_labeled, labels = train_labeled_loader.next()
+        #specs_unlabeled, unsup_labels = train_unlabeled_loader.next()
+        
         #print("LABEL SHAPE:", labels.shape)
         #print("SPECT SHAPE:", specs.shape)
 
@@ -205,13 +228,11 @@ for epoch in range(args.epochs):
                         labels.to(device)
                     ).float()
         loss = sup_loss
+        sum_sup_loss += sup_loss * batch_size
 
-        writer.add_scalar("Loss/sup", sup_loss, epoch)
-
-        # Track F1 score
+        # Track accuracy
         predicted = pred_sup_l > threshold
         batch_size = labels.shape[0]
-        #epoch_total += batch_size
 
         correct = 0
         total = labels.shape[0] * labels.shape[1]
@@ -232,31 +253,16 @@ for epoch in range(args.epochs):
             pred_l = torch.cat([pred_sup_l, pred_unsup_l], dim=0)
             pred_r = torch.cat([pred_sup_r, pred_unsup_r], dim=0)
 
-            '''
-            _, max_l = torch.max(pred_l, dim=2)
-            _, max_r = torch.max(pred_r, dim=2)
-            #print(max_l)
-            max_l = max_l.long()
-            max_r = max_r.long()
-            '''
-
             max_l = pred_l > threshold
             max_r = pred_r > threshold
             max_l = max_l.float()
             max_r = max_r.float()
-
-            #print("dim of target:", max_l.shape, max_r.shape)
-            #print("dim of pred:", pred_l.shape, pred_r.shape)
             
-            #if args.cps and epoch >= args.warmup:
             cps_loss = criterion_cps(pred_l, max_r).float() + criterion_cps(pred_r, max_l).float()
-            #cps_loss = criterion_cps(pred_l.transpose(1,2), max_r) + criterion_cps(pred_r.transpose(1,2), max_l)
-            writer.add_scalar("Loss/cps", cps_loss, epoch + i/total_step)
+            
 
             # calculate accuracy on unlabeled data
             predicted = pred_unsup_l > threshold
-            batch_size = unsup_labels.shape[0]
-            #epoch_total += batch_size
 
             correct = 0
             total = unsup_labels.shape[0] * unsup_labels.shape[1]
@@ -274,25 +280,21 @@ for epoch in range(args.epochs):
             unlabeled_sup_thresholded_loss = criterion((pred_unsup_l > threshold).float(), unsup_labels.to(device)).float() + \
                                     criterion((pred_unsup_r > threshold).float(), unsup_labels.to(device)).float()
 
-            writer.add_scalar("Loss/sup_unlabeled", unlabeled_sup_loss, epoch + i/total_step)
-            writer.add_scalar("Loss/sup_unlabeled_thresholded", unlabeled_sup_thresholded_loss, epoch + i/total_step)
+            sum_unsup_loss += unlabeled_sup_loss * batch_size
+            sum_unsup_thresholded_loss += unlabeled_sup_thresholded_loss * batch_size
 
-            #loss = sup_loss + 1.5 * cps_loss
+            #print(cps_loss)
             loss += args.cps_weight * cps_loss
+            sum_cps_loss += cps_loss * batch_size
 
         # Backward and optimize
-        #optim_l.zero_grad()
-        #optim_r.zero_grad()
         loss.backward()
         optim_l.step()
         optim_r.step()
 
         if (i+1) % 30 == 0:
             print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {correct/total * 100}%")
-        # print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {f1 * 100}%")
-        #print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {correct/total * 100}%")
-
-        #scores = np.add(scores, f1 * batch_size)
+            sys.stdout.flush()
         epoch_loss += loss.item() * batch_size
         normal_total += batch_size
     
@@ -300,13 +302,16 @@ for epoch in range(args.epochs):
     lr_scheduler_l.step()
     lr_scheduler_r.step()
 
-    #print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {epoch_loss:.4f}, Accuracy: {scores / epoch_total * 100}%")
     print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {epoch_loss / normal_total:.4f}, Accuracy: {epoch_correct / epoch_total * 100}%")
 
     writer.add_scalar("Loss/train", epoch_loss / normal_total, epoch)
+    writer.add_scalar("Loss/sup", sum_sup_loss / normal_total, epoch)
     writer.add_scalar("Accuracy/train_labeled", epoch_correct / epoch_total, epoch)
-    if epoch >= args.warmup:
+    if args.cps and epoch >= args.warmup:
         writer.add_scalar("Accuracy/train_unlabeled", epoch_correct_u / epoch_total_u, epoch)
+        writer.add_scalar("Loss/cps", sum_cps_loss / normal_total, epoch)
+        writer.add_scalar("Loss/sup_unlabeled", sum_unsup_loss / normal_total, epoch)
+        writer.add_scalar("Loss/sup_unlabeled_thresholded", sum_unsup_thresholded_loss / normal_total, epoch)
 
     ''' Validation '''
     # Test the model
@@ -319,6 +324,7 @@ for epoch in range(args.epochs):
         total = 0
 
         val_scores = np.zeros(4)
+        val_auc = np.zeros(4)
         val_loss = 0
 
         full_outputs = "empty"
@@ -350,16 +356,6 @@ for epoch in range(args.epochs):
                 correct += same.all(axis=1).sum()
             acc_total += labels.shape[0] * labels.shape[1]
 
-            '''
-            predicted = predicted.reshape(
-                (labels.shape[0] * labels.shape[1], 4)
-            ).cpu().numpy().transpose(1, 0)
-            
-            labels = labels.reshape(
-                (labels.shape[0] * labels.shape[1], 4)
-            ).cpu().numpy().transpose(1, 0)
-            '''
-
             val_loss += loss.item() * batch_size
 
         full_labels = full_labels.reshape(
@@ -371,9 +367,13 @@ for epoch in range(args.epochs):
 
         for i in range(4):
             val_scores[i] = sklearn.metrics.f1_score(
-                full_outputs[i] > threshold,
                 full_labels[i],
+                full_outputs[i] > threshold, 
                 zero_division=0
+            )
+            val_auc[i] = sklearn.metrics.roc_auc_score(
+                full_labels[i],
+                full_outputs[i],
             )
 
         val_loss /= total
@@ -390,24 +390,33 @@ for epoch in range(args.epochs):
         os.fsync(csv.fileno())
 
         # Save the model checkpoint if validation accuracy improves
+        score_sum = np.sum(val_auc)
+        writer.add_scalar("Accuracy/val_auc_sum", score_sum, epoch)
+        if score_sum > best_val_auc:
+            print('Saving model (auc) ...')
+            torch.save(model.state_dict(), f"models/model_{args.name}_auc.pt")
+            best_val_auc = score_sum
+
         score_sum = np.sum(val_scores)
         writer.add_scalar("Accuracy/val_f1_sum", score_sum, epoch)
         if score_sum > best_val_f1:
-            print('Saving model...')
-            torch.save(model.state_dict(), f"model_{args.name}.pt")
+            print('Saving model (f1)...')
+            torch.save(model.state_dict(), f"models/model_{args.name}.pt")
             #best_val_acc = correct / total
             best_val_f1 = score_sum
 
+        '''
         # Save model checkpoint if val loss is lower
         if val_loss < best_val_loss:
-            print('Saving model...')
+            print('Saving model... (loss)')
             torch.save(model.state_dict(), f"model_{args.name}_loss.pt")
             best_val_loss = val_loss
 
         if correct / acc_total > best_val_acc:
-            print('Saving model...')
+            print('Saving model... (acc)')
             torch.save(model.state_dict(), f"model_{args.name}_acc.pt")
             best_val_acc = correct / acc_total
-        
+
         if epoch % 10 == 0:
             torch.save(model.state_dict(), f"model_{args.name}_last.pt")
+        '''

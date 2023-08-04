@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 # Custom imports
 from H5_dataset import HF_Lung_Dataset
 #from models import Cnn14_8k, TwinNetworkGRU
-from models_deconv import TwinNetworkGRU
+from models_baseline import TwinNetworkDeconv
 
 import sys
 
@@ -61,13 +61,13 @@ print(f"Using device: {device}")
 # Initialize model
 print("Initializing model...")
 #model = TwinNetworkGRU(64, 4, device)
-model = TwinNetworkGRU(64, 4, device, gru_layers=2)
+model = TwinNetworkDeconv(64, 4, device)
 #fc_audioset_in_params = model.fc_audioset.in_features
 #model.fc_audioset = nn.Linear(fc_audioset_in_params, 6, bias=True)
 
 exp_name = sys.argv[1]
 
-checkpoint = torch.load(f"models/model_{exp_name}.pt")
+checkpoint = torch.load(f"model_{exp_name}.pt")
 
 # Remove all the "module." from the keys because that's there for some reason
 checkpoint_clean = {}
@@ -93,7 +93,7 @@ with torch.no_grad():
 
     for specs, labels in tqdm(test_loader):
         inp = specs.float().to(device)
-        outputs, _ = model(inp)
+        (outputs, _), _ = model(inp)
         if full_outputs == "empty":
             full_outputs = outputs
         else: # concat
@@ -171,15 +171,13 @@ with torch.no_grad():
 
     auc = []
     f1 = []
-    prauc = []
 
     for i in range(4):
         precision, recall, thresholds = sklearn.metrics.precision_recall_curve(full_labels[i], full_outputs[i])
         ax1.plot(recall, precision, label="IEDC"[i])
         f1_scores = 2*recall*precision/(recall+precision+np.finfo(float).eps)
         #print(f'Best threshold for class {i}: ', thresholds[np.argmax(f1_scores)])
-        #print(f'Best F1-Score for class {i}: ', np.max(f1_scores))
-        f1.append(np.max(f1_scores))
+        print(f'Best F1-Score for class {i}: ', np.max(f1_scores))
 
         #p = full_labels[i].sum()
         #n = len(full_labels[i]) - p
@@ -192,12 +190,10 @@ with torch.no_grad():
         '''
         ax2.plot(fpr, tpr, label="IEDC"[i])
         auc.append(sklearn.metrics.roc_auc_score(full_labels[i], full_outputs[i]))
-        #f1.append(sklearn.metrics.f1_score(full_labels[i] > threshold, full_outputs[i].round()))
-        prauc.append(sklearn.metrics.average_precision_score(full_labels[i], full_outputs[i]))
+        f1.append(sklearn.metrics.f1_score(full_labels[i] > threshold, full_outputs[i].round()))
     
     print(f'AUC: {auc}')
-    print(f'PR AUC: {prauc}')
-    print(f'F1: {f1}')
+    #print(f'F1: {f1}')
     
     plt.legend()
-    plt.savefig(f"curves/pr_{exp_name}.png")
+    plt.savefig(f"pr_{exp_name}.png")

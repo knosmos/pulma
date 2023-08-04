@@ -77,6 +77,10 @@ def pad_framewise_output(framewise_output, frames_num):
     Outputs:
       output: (batch_size, frames_num, classes_num)
     """
+    if frames_num < framewise_output.shape[1]:
+        #print("cutting", framewise_output.shape[1] - frames_num, "frames")
+        return framewise_output[:, :frames_num, :]
+
     pad = framewise_output[:, -1 :, :].repeat(1, frames_num - framewise_output.shape[1], 1)
     """tensor for padding"""
 

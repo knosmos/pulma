@@ -624,10 +624,10 @@ class TwinNetworkGRU(nn.Module):
 '''
 
 class BiGRUNetwork(nn.Module):
-    def __init__(self, input_size, num_classes, device):
+    def __init__(self, input_size, num_classes, device, gru_layers=3):
         super(BiGRUNetwork, self).__init__()
         self.hidden_size = 1024
-        self.num_layers = 3
+        self.num_layers = gru_layers
         self.backbone = Cnn14_8k(sample_rate=8000, window_size=256, hop_size=80, mel_bins=64, fmin=50, fmax=4000, classes_num=527)
         self.gru = nn.GRU(2048, self.hidden_size, self.num_layers, bidirectional=True, batch_first=True, dropout=0.2)
         self.fc = nn.Linear(self.hidden_size * 2, num_classes)
@@ -658,10 +658,10 @@ class BiGRUNetwork(nn.Module):
         return framewise_output
 
 class TwinNetworkGRU(nn.Module):
-    def __init__(self, input_size, num_classes, device, single=False):
+    def __init__(self, input_size, num_classes, device, single=False, gru_layers=3):
         super(TwinNetworkGRU, self).__init__()
-        self.l = BiGRUNetwork(input_size, num_classes, device)
-        self.r = BiGRUNetwork(input_size, num_classes, device)
+        self.l = BiGRUNetwork(input_size, num_classes, device, gru_layers=gru_layers)
+        self.r = BiGRUNetwork(input_size, num_classes, device, gru_layers=gru_layers)
         self.device = device
         self.single = single
         self.init_weights()

@@ -24,6 +24,8 @@ from models import TwinNetwork, Cnn14_8k
 import librosa
 import librosa.display
 
+import people_split
+
 import time
 import sys
 import argparse
@@ -48,7 +50,7 @@ parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to
 parser.add_argument('--batch', type=int, default=64, help='Batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
 parser.add_argument('--val', type=float, default=0.1, help='Validation split')
-parser.add_argument('--shuffle', type=bool, default=False, help='Shuffle dataset')
+parser.add_argument('--shuffle', type=bool, default=True, help='Shuffle dataset')
 
 # Get arguments
 args = parser.parse_args()
@@ -77,12 +79,14 @@ train_dataset = HF_Lung_Dataset(train=True, dataFName='train_steth.h5')
 
 # Creating data indices for training and validation splits:
 dataset_size = len(train_dataset)
-indices = list(range(dataset_size))
 split = int(np.floor(validation_split * dataset_size))
-if shuffle_dataset:
-    np.random.shuffle(indices)
+people = people_split.people
+np.random.shuffle(people)
+print("number of people:", len(people))
+indices = []
+for person in people:
+    indices.extend(person)
 train_indices, val_indices = indices[split:], indices[:split]
-
 # extract percentage of data
 train_labeled_indices = train_indices[:(len(train_indices) * percent_data) // 100]
 train_unlabeled_indices = train_indices[(len(train_indices) * percent_data) // 100:]
@@ -107,6 +111,14 @@ writer = SummaryWriter()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
+numofeach = np.zeros(6)
+for specs, label_batch in validation_loader:
+    for labels in label_batch:
+        for label in labels:
+            numofeach = np.add(numofeach, label)
+print("validation:")
+print(numofeach.cpu().numpy().astype(np.float64)/(len(val_indices) * 1500))
+print(numofeach.cpu().numpy().astype(np.float64))
 
 # get stats of dataset
 numofeach = np.zeros(6)
@@ -115,7 +127,8 @@ for specs, label_batch in train_labeled_loader:
         for label in labels:
             numofeach = np.add(numofeach, label)
 print("train, labeled:")
-print(numofeach.cpu().numpy().astype(np.int64))
+print(numofeach.cpu().numpy().astype(np.float64)/(len(train_labeled_indices) * 1500))
+print(numofeach.cpu().numpy().astype(np.float64))
 
 numofeach = np.zeros(6)
 for specs, label_batch in train_unlabeled_loader:
@@ -123,12 +136,5 @@ for specs, label_batch in train_unlabeled_loader:
         for label in labels:
             numofeach = np.add(numofeach, label)
 print("train, unlabeled:")
-print(numofeach.cpu().numpy().astype(np.int64))
-
-numofeach = np.zeros(6)
-for specs, label_batch in validation_loader:
-    for labels in label_batch:
-        for label in labels:
-            numofeach = np.add(numofeach, label)
-print("validation:")
-print(numofeach.cpu().numpy().astype(np.int64))
+print(numofeach.cpu().numpy().astype(np.float64)/(len(train_unlabeled_indices) * 1500))
+print(numofeach.cpu().numpy().astype(np.float64))

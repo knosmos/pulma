@@ -28,6 +28,8 @@ import time
 import sys
 import argparse
 
+from copy import deepcopy
+
 ''' Settings '''
 # Argparser
 parser = argparse.ArgumentParser(description='Train PANN + CPS on the HF Lung dataset')
@@ -50,7 +52,6 @@ parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to
 parser.add_argument('--batch', type=int, default=64, help='Batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
 parser.add_argument('--val', type=float, default=0.1, help='Validation split')
-parser.add_argument('--shuffle', type=bool, default=True, help='Shuffle dataset')
 
 # Get arguments
 args = parser.parse_args()
@@ -62,7 +63,6 @@ num_epochs = args.epochs
 batch_size = args.batch
 learning_rate = args.lr
 validation_split = args.val
-shuffle_dataset = args.shuffle
 
 # Other settings
 random_seed = args.seed # chosen by fair dice roll. guaranteed to be random.
@@ -80,9 +80,57 @@ train_dataset = HF_Lung_Dataset(train=True, dataFName='train_steth_combined.h5')
 # Creating data indices for training and validation splits:
 dataset_size = len(train_dataset)
 split = int(np.floor(validation_split * dataset_size))
-people = people_split.people
-if shuffle_dataset:    
+
+tot = np.array([1, 1.427409854, 2.177351724, 1.951449024]) # supposed weights for entire dataset
+best = 1000
+best_seed = -1
+for seed in tqdm(range(200)):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    people = deepcopy(people_split.people) 
     np.random.shuffle(people)
+    #print("number of people:", len(people))
+    indices = []
+    for person in people:
+        indices.extend(person)
+    train_indices, val_indices = indices[split:], indices[:split]
+
+    diff = 0
+    for percent_data in [6.25, 12.5, 25, 50]:
+        # extract percentage of data
+        train_labeled_indices = train_indices[:int((len(train_indices) * percent_data) // 100)]
+        train_unlabeled_indices = train_indices[int((len(train_indices) * percent_data) // 100):]
+
+        # Creating PT data samplers and loaders:
+        train_labeled_sampler = SubsetRandomSampler(train_labeled_indices)
+        train_unlabeled_sampler = SubsetRandomSampler(train_unlabeled_indices)
+        valid_sampler = SubsetRandomSampler(val_indices)
+
+        train_labeled_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_labeled_sampler)
+        train_unlabeled_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_unlabeled_sampler)
+        validation_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=valid_sampler)
+
+        #print(f"Train: {len(train_indices)} samples, Validation: {len(val_indices)} samples")
+
+        # get stats of dataset
+        wt = np.zeros(4)
+        for specs, label_batch in train_labeled_loader:
+            wt = np.add(wt, label_batch.sum(dim=1).sum(dim=0))
+        m = int(wt[0])
+        for i in range(4):
+            wt[i] = m / wt[i]
+        #print(f"{percent_data}%: {wt}")
+        diff += np.sum(np.abs(wt.cpu().numpy() - tot)) ** 2
+    if diff < best and seed != 50:
+        best = diff
+        best_seed = seed
+
+print(f"best seed: {best_seed}")
+np.random.seed(best_seed)
+torch.manual_seed(best_seed)
+
+people = deepcopy(people_split.people) 
+np.random.shuffle(people)
 print("number of people:", len(people))
 indices = []
 for person in people:
@@ -90,7 +138,6 @@ for person in people:
 train_indices, val_indices = indices[split:], indices[:split]
 
 for percent_data in [6.25, 12.5, 25, 50]:
-    # extract percentage of data
     train_labeled_indices = train_indices[:int((len(train_indices) * percent_data) // 100)]
     train_unlabeled_indices = train_indices[int((len(train_indices) * percent_data) // 100):]
 
@@ -105,18 +152,13 @@ for percent_data in [6.25, 12.5, 25, 50]:
 
     #print(f"Train: {len(train_indices)} samples, Validation: {len(val_indices)} samples")
 
-
     # get stats of dataset
     wt = np.zeros(4)
-    opp = np.zeros(4)
     for specs, label_batch in train_labeled_loader:
         wt = np.add(wt, label_batch.sum(dim=1).sum(dim=0))
-        opp = np.add(opp, (1 - label_batch).sum(dim=1).sum(dim=0))
-    #m = int(wt[0])
-    #for i in range(4):
-    #    wt[i] = m / wt[i]
+    m = int(wt[0])
     for i in range(4):
-        wt[i] = opp[i] / wt[i]
+        wt[i] = m / wt[i]
     print(f"{percent_data}%: {wt}")
 
 '''

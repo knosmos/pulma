@@ -104,19 +104,16 @@ validation_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=val
 
 print(f"Train: {len(train_indices)} samples, Validation: {len(val_indices)} samples")
 
-# Result storage
-csv = open(f"results/{args.name}_{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S')}.csv", "w")
-writer = SummaryWriter()
-
 ''' Model '''
 # Enable GPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device("cpu")
 print(f"Using device: {device}")
 
 # Initialize models
 print("Initializing model...")
 #extractor = Cnn14_8k(sample_rate=8000, window_size=256, hop_size=80, mel_bins=64, fmin=50, fmax=4000, classes_num=527)
-model = TwinNetworkGRU(64, 4, device, single=(not args.cps))
+model = TwinNetworkGRU(64, 4, device, single=(not args.cps), gru_layers=2)
 
 # Load pretrained model
 if args.pretrained:
@@ -143,7 +140,7 @@ model.to(device)
 
 # Loss and optimizer
 criterion = nn.BCELoss() # Needed since we are doing multilabel classification
-criterion_cps = nn.BCELoss()
+criterion_cps = nn.BCELoss(reduction="none")
 
 # these are copied from CPS code
 #criterion = ProbOhemCrossEntropy2d(ignore_label=255, thresh=0.7,
@@ -166,6 +163,10 @@ best_val_acc = 0
 best_val_loss = 100
 best_val_f1 = 0
 
+# Result storage
+csv = open(f"results/{args.name}_{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S')}.csv", "w")
+writer = SummaryWriter()
+
 for epoch in range(args.epochs):
     model.train()
 
@@ -175,11 +176,14 @@ for epoch in range(args.epochs):
 
     epoch_correct_u = 0 # unlabeled
     epoch_total_u = 0
+    sum_sup_loss = 0
+    sum_unsup_thresholded_loss = 0
+    sum_unsup_loss = 0
+    sum_cps_loss = 0
 
     scores = np.zeros(4)
     normal_total = 0
-    #for i, (specs_labeled, labels, specs_unlabeled, _) in enumerate(zip(train_labeled_loader, train_unlabeled_loader)):
-    
+
     for i in range(total_step):
         #print(f'iter={i}')
         optim_l.zero_grad()
@@ -187,7 +191,9 @@ for epoch in range(args.epochs):
         # Get data
         specs_labeled, labels = train_labeled_loader.__iter__().__next__()
         specs_unlabeled, unsup_labels = train_unlabeled_loader.__iter__().__next__()
-
+        #specs_labeled, labels = train_labeled_loader.next()
+        #specs_unlabeled, unsup_labels = train_unlabeled_loader.next()
+        
         #print("LABEL SHAPE:", labels.shape)
         #print("SPECT SHAPE:", specs.shape)
 
@@ -205,13 +211,11 @@ for epoch in range(args.epochs):
                         labels.to(device)
                     ).float()
         loss = sup_loss
+        sum_sup_loss += sup_loss * batch_size
 
-        writer.add_scalar("Loss/sup", sup_loss, epoch)
-
-        # Track F1 score
+        # Track accuracy
         predicted = pred_sup_l > threshold
         batch_size = labels.shape[0]
-        #epoch_total += batch_size
 
         correct = 0
         total = labels.shape[0] * labels.shape[1]
@@ -232,14 +236,6 @@ for epoch in range(args.epochs):
             pred_l = torch.cat([pred_sup_l, pred_unsup_l], dim=0)
             pred_r = torch.cat([pred_sup_r, pred_unsup_r], dim=0)
 
-            '''
-            _, max_l = torch.max(pred_l, dim=2)
-            _, max_r = torch.max(pred_r, dim=2)
-            #print(max_l)
-            max_l = max_l.long()
-            max_r = max_r.long()
-            '''
-
             max_l = pred_l > threshold
             max_r = pred_r > threshold
             max_l = max_l.float()
@@ -247,16 +243,44 @@ for epoch in range(args.epochs):
 
             #print("dim of target:", max_l.shape, max_r.shape)
             #print("dim of pred:", pred_l.shape, pred_r.shape)
+
+            # calculate weights (by cheating)
+            weights = torch.zeros(pred_l.shape[0]).to(device)
+            gt_full = torch.cat([labels, unsup_labels], dim=0).to(device)
+            '''
+            for j in range(len(pred_l)):
+                # take euclidean distance between predictions and labels
+                dist = torch.dist(pred_l[j], gt_full[j], p=2) + torch.dist(pred_r[j], gt_full[j], p=2)
+                weights[j] = torch.exp(-0.2 * dist)
+
+            # normalize weights
+            weights = weights / torch.sum(weights)
+            '''
+            for j in range(len(pred_l)):
+                # take euclidean distance between predictions and labels
+                dist = torch.dist(pred_l[j], gt_full[j], p=2) + torch.dist(pred_r[j], gt_full[j], p=2)
+                weights[j] = dist
+            #print(weights)
+
+            # calculate cps loss
+            cps_unweight_loss_1 = criterion_cps(pred_l, max_r).float()
+            cps_unweight_loss_2 = criterion_cps(pred_r, max_l).float()
             
-            #if args.cps and epoch >= args.warmup:
-            cps_loss = criterion_cps(pred_l, max_r).float() + criterion_cps(pred_r, max_l).float()
-            #cps_loss = criterion_cps(pred_l.transpose(1,2), max_r) + criterion_cps(pred_r.transpose(1,2), max_l)
-            writer.add_scalar("Loss/cps", cps_loss, epoch + i/total_step)
+            #print(cps_unweight_loss_1.shape, cps_unweight_loss_2.shape)
+            #print(weights.shape)
+            #print(cps_unweight_loss_1)
+            
+            '''
+            cps_weight_loss_1 = torch.mean(torch.mean(cps_unweight_loss_1, dim=[1,2]) * weights)
+            cps_weight_loss_2 = torch.mean(torch.mean(cps_unweight_loss_2, dim=[1,2]) * weights)
+            cps_loss = cps_weight_loss_1 + cps_weight_loss_2
+            '''
+            cps_loss = torch.mean(cps_unweight_loss_1) + torch.mean(cps_unweight_loss_2) + torch.mean(weights) / 1500
+
+            sum_cps_loss += cps_loss * batch_size
 
             # calculate accuracy on unlabeled data
             predicted = pred_unsup_l > threshold
-            batch_size = unsup_labels.shape[0]
-            #epoch_total += batch_size
 
             correct = 0
             total = unsup_labels.shape[0] * unsup_labels.shape[1]
@@ -274,25 +298,20 @@ for epoch in range(args.epochs):
             unlabeled_sup_thresholded_loss = criterion((pred_unsup_l > threshold).float(), unsup_labels.to(device)).float() + \
                                     criterion((pred_unsup_r > threshold).float(), unsup_labels.to(device)).float()
 
-            writer.add_scalar("Loss/sup_unlabeled", unlabeled_sup_loss, epoch + i/total_step)
-            writer.add_scalar("Loss/sup_unlabeled_thresholded", unlabeled_sup_thresholded_loss, epoch + i/total_step)
+            sum_unsup_loss += unlabeled_sup_loss * batch_size
+            sum_unsup_thresholded_loss += unlabeled_sup_thresholded_loss * batch_size
 
-            #loss = sup_loss + 1.5 * cps_loss
+            #print(cps_loss)
             loss += args.cps_weight * cps_loss
 
         # Backward and optimize
-        #optim_l.zero_grad()
-        #optim_r.zero_grad()
         loss.backward()
         optim_l.step()
         optim_r.step()
 
         if (i+1) % 30 == 0:
             print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {correct/total * 100}%")
-        # print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {f1 * 100}%")
-        #print(f"Epoch [{epoch+1}/{args.epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {correct/total * 100}%")
-
-        #scores = np.add(scores, f1 * batch_size)
+        
         epoch_loss += loss.item() * batch_size
         normal_total += batch_size
     
@@ -300,13 +319,16 @@ for epoch in range(args.epochs):
     lr_scheduler_l.step()
     lr_scheduler_r.step()
 
-    #print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {epoch_loss:.4f}, Accuracy: {scores / epoch_total * 100}%")
     print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {epoch_loss / normal_total:.4f}, Accuracy: {epoch_correct / epoch_total * 100}%")
 
     writer.add_scalar("Loss/train", epoch_loss / normal_total, epoch)
+    writer.add_scalar("Loss/sup", sum_sup_loss / normal_total, epoch)
     writer.add_scalar("Accuracy/train_labeled", epoch_correct / epoch_total, epoch)
-    if epoch >= args.warmup:
+    if args.cps and epoch >= args.warmup:
         writer.add_scalar("Accuracy/train_unlabeled", epoch_correct_u / epoch_total_u, epoch)
+        writer.add_scalar("Loss/cps", sum_cps_loss / normal_total, epoch)
+        writer.add_scalar("Loss/sup_unlabeled", sum_unsup_loss / normal_total, epoch)
+        writer.add_scalar("Loss/sup_unlabeled_thresholded", sum_unsup_thresholded_loss / normal_total, epoch)
 
     ''' Validation '''
     # Test the model
@@ -349,16 +371,6 @@ for epoch in range(args.epochs):
                 same = predicted[image] == labels[image].to(device)
                 correct += same.all(axis=1).sum()
             acc_total += labels.shape[0] * labels.shape[1]
-
-            '''
-            predicted = predicted.reshape(
-                (labels.shape[0] * labels.shape[1], 4)
-            ).cpu().numpy().transpose(1, 0)
-            
-            labels = labels.reshape(
-                (labels.shape[0] * labels.shape[1], 4)
-            ).cpu().numpy().transpose(1, 0)
-            '''
 
             val_loss += loss.item() * batch_size
 
